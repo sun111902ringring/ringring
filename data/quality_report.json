@@ -1,0 +1,71 @@
+{
+  "scope": "selected stations; OD includes trips with at least one selected endpoint",
+  "station_count": 60,
+  "hourly_rows": 2629440,
+  "inventory_rows": 1969375,
+  "rentals_counted": 7665060,
+  "returns_counted": 7933527,
+  "selected_station_master_match_rate": 1.0,
+  "od_trip_endpoint_any_snapshot_match_rate": 0.9999909851324764,
+  "missing_historical_master_rows": 74940,
+  "yearly_coverage": [
+    {
+      "year": 2021,
+      "expected_station_hours": 525600,
+      "rental_hours_with_events": 522486,
+      "return_hours_with_events": 522486,
+      "inventory_hours_present": 0,
+      "inventory_values_valid": 0
+    },
+    {
+      "year": 2022,
+      "expected_station_hours": 525600,
+      "rental_hours_with_events": 524704,
+      "return_hours_with_events": 524704,
+      "inventory_hours_present": 471900,
+      "inventory_values_valid": 471900
+    },
+    {
+      "year": 2023,
+      "expected_station_hours": 525600,
+      "rental_hours_with_events": 522188,
+      "return_hours_with_events": 522188,
+      "inventory_hours_present": 507660,
+      "inventory_values_valid": 507660
+    },
+    {
+      "year": 2024,
+      "expected_station_hours": 527040,
+      "rental_hours_with_events": 526178,
+      "return_hours_with_events": 526178,
+      "inventory_hours_present": 467940,
+      "inventory_values_valid": 467940
+    },
+    {
+      "year": 2025,
+      "expected_station_hours": 525600,
+      "rental_hours_with_events": 524875,
+      "return_hours_with_events": 524875,
+      "inventory_hours_present": 521875,
+      "inventory_values_valid": 521875
+    }
+  ],
+  "coverage_status": {
+    "observed_operating": 2620431,
+    "unverified": 9009
+  },
+  "training_ready": true,
+  "inventory_2021_available": false,
+  "inventory_valid_values": 1969375,
+  "inventory_conflicting_hours": 0,
+  "inventory_multi_obs_first_hours": 464617,
+  "inventory_resolution": "first_in_file_order",
+  "warnings": [
+    "No implicit zero fill; validate operating/source coverage before training.",
+    "Holiday data not joined; is_holiday remains null.",
+    "Stock source column 거치대수량 is retained as provided; instantaneous timing semantics need confirmation.",
+    "Sub-hourly inventory rows (2023, 2024 Jul~Aug) resolved to the first row in file order (assumed closest to hh:00).",
+    "Dock count is not a hard capacity. Master features use strictly prior publication/modification dates.",
+    "Date-boundary trips may require adjacent 2020/2026 source files."
+  ]
+}
