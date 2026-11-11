@@ -113,6 +113,24 @@ def pick_reference_date(target_date, df):
     return None if candidates.empty else candidates["date"].max()
 
 
+def sidebar_station_picker(disabled=False):
+    """사이드바 대여소 드롭다운. 선택한 station_id를 돌려주고, '전체 대여소'면 None."""
+    if not find_data_file(STATIONS_FILE).exists():
+        return None
+    stations = load_stations()
+    names = stations["station_name"].fillna(stations["station_id"])
+    duplicated = names.duplicated(keep=False)  # 이름이 같은 대여소는 ID를 덧붙여 구분
+    labels = np.where(duplicated, names + " (" + stations["station_id"] + ")", names)
+    lookup = dict(zip(labels, stations["station_id"]))
+    choice = st.sidebar.selectbox(
+        "📍 대여소 선택",
+        ["전체 대여소"] + sorted(lookup),
+        disabled=disabled,
+        help="지도(1·2번 메뉴)는 선택한 대여소로 확대되고, 선 그래프(4번 메뉴)는 해당 대여소만 보여줍니다.",
+    )
+    return None if choice == "전체 대여소" else lookup[choice]
+
+
 @st.cache_resource(show_spinner="모델을 불러오는 중입니다...")
 def load_model(model_name, target):
     path = model_path(model_name, target)
@@ -303,6 +321,8 @@ selected_date = st.sidebar.date_input(
     max_value=today + dt.timedelta(days=MAX_DAYS_AHEAD),
 )
 period_label = st.sidebar.selectbox("피크 시간대 선택", list(PERIOD_OPTIONS))
+# ESG 리포트(3번) 화면에서는 쓰지 않지만, 선택값이 사라지지 않도록 비활성화 상태로 계속 보여준다.
+selected_station_id = sidebar_station_picker(disabled=mode.startswith("3."))
 st.sidebar.caption(
     "선택한 날짜는 아직 실제 데이터가 없으므로, 같은 요일의 가장 최근 실제 데이터(대여·반납 이력, 재고, 기상)를 "
     "모델에 입력해 예측하는 시뮬레이션입니다."
@@ -348,14 +368,15 @@ def get_predictions():
     return df_pred, info
 
 
-def station_picker(df, key, label="📍 대여소 선택 (선택하면 지도가 해당 위치로 확대됩니다)", all_label="전체 보기"):
-    """대여소 드롭다운. 선택한 대여소의 행(Series)을 돌려주고, all_label을 고르면 None."""
-    names = df["대여소명"]
-    duplicated = names.duplicated(keep=False)  # 이름이 같은 대여소는 ID를 덧붙여 구분
-    labels = np.where(duplicated, names + " (" + df["대여소ID"] + ")", names)
-    lookup = dict(zip(labels, df.index))
-    choice = st.selectbox(label, [all_label] + sorted(lookup), key=key)
-    return None if choice == all_label else df.loc[lookup[choice]]
+def station_row(df, station_id):
+    """사이드바에서 고른 station_id에 해당하는 행(Series). 없으면 None."""
+    if station_id is None:
+        return None
+    match = df[df["대여소ID"] == station_id]
+    if match.empty:
+        st.caption("선택한 대여소는 이번 조건에서 예측 결과가 없어 전체 보기로 표시합니다.")
+        return None
+    return match.iloc[0]
 
 
 def make_base_map(df, selected=None):
@@ -423,7 +444,7 @@ if mode == "1. 실시간 수급 불균형 지도":
                 "포화 위험", f"{overflow_cnt}곳", delta="+주의", delta_color="inverse",
                 help="예측 잔여 자전거가 거치대 여유 3칸 이하라 반납이 어려운 대여소",
             )
-        selected_station = station_picker(df_predicted, key="station_pick_map1")
+        selected_station = station_row(df_predicted, selected_station_id)
         m = make_base_map(df_predicted, selected_station)
 
         for _, row in df_predicted.iterrows():
@@ -475,7 +496,7 @@ if mode == "1. 실시간 수급 불균형 지도":
             if c in table.columns:
                 table[c] = table[c].round(1)
         table = table.rename(columns={"실제_NetFlow": "참조일_실제_NetFlow"})
-        st.dataframe(table, width=True, height=400)
+        st.dataframe(table, use_container_width=True, height=400)
         if info["has_actual"]:
             st.caption(
                 f"참조일_실제_NetFlow: 참조일({info['ref_date']}) 같은 시간대의 실제 (반납 - 대여) 합계로, "
@@ -501,9 +522,9 @@ elif mode == "2. K-Means 클러스터 분석":
         .reset_index()
     )
 
-    st.dataframe(cluster_group, width=True)
+    st.dataframe(cluster_group, use_container_width=True)
 
-    selected_station = station_picker(df_predicted, key="station_pick_map2")
+    selected_station = station_row(df_predicted, selected_station_id)
     m_cluster = make_base_map(df_predicted, selected_station)
     for _, row in df_predicted.iterrows():
         is_selected = (
@@ -571,7 +592,7 @@ elif mode == "3. 기업 맞춤형 '그린 출퇴근 패스' (ESG 리포트)":
         "ESG 가치 환산 점수": [f"{active_users * 2.5 + carbon_saved_kg * 0.5:.1f} 점"],
     })
 
-    st.dataframe(df_esg_report, width=True)
+    st.dataframe(df_esg_report, use_container_width=True)
     st.success(f"💡 {selected_company} 임직원들의 역방향 대여소 자전거 활용으로 환경(E) 및 사회(S) 지표가 크게 향상되었습니다.")
 
 # ------------------------------------------
@@ -587,13 +608,16 @@ elif mode == "4. 시간대별 대여·반납 예측 (선 그래프)":
     weekday = WEEKDAYS[selected_date.weekday()]
     st.subheader(f"📈 [{model_type} 모델] {selected_date}({weekday}) 시간대별 예측 대여·반납 대수")
 
-    stations_df = daily.drop_duplicates("대여소ID")[["대여소ID", "대여소명"]].reset_index(drop=True)
-    picked = station_picker(
-        stations_df, key="station_pick_chart", label="📍 대상 대여소", all_label="전체 대여소 합계"
-    )
-    hourly = hourly_totals(daily, None if picked is None else picked["대여소ID"])
+    picked_id = selected_station_id
+    if picked_id is not None and not (daily["대여소ID"] == picked_id).any():
+        st.caption("선택한 대여소는 이 날짜 데이터가 없어 전체 대여소 합계를 보여드립니다.")
+        picked_id = None
+    hourly = hourly_totals(daily, picked_id)
 
-    target_name = "전체 대여소 합계" if picked is None else picked["대여소명"]
+    if picked_id is None:
+        target_name = "전체 대여소 합계"
+    else:
+        target_name = daily.loc[daily["대여소ID"] == picked_id, "대여소명"].iloc[0]
     st.markdown(f"##### {target_name}")
     st.line_chart(
         hourly,
@@ -603,4 +627,4 @@ elif mode == "4. 시간대별 대여·반납 예측 (선 그래프)":
         height=420,
     )
     with st.expander("시간별 예측값 표 보기"):
-        st.dataframe(hourly.round(1), width=True)
+        st.dataframe(hourly.round(1), use_container_width=True)
