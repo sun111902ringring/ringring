@@ -1,10 +1,12 @@
 import datetime as dt
+import time
 from pathlib import Path
 
 import folium
 import joblib
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 from streamlit_folium import st_folium
 
@@ -26,6 +28,12 @@ MODEL_OPTIONS = ["GRU", "LightGBM", "XGBoost"]
 PERIOD_OPTIONS = {"오전 출근": "morning", "오후 퇴근": "evening"}  # commute_period 값과 매칭
 WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]
 MAX_DAYS_AHEAD = 365  # 날짜 선택 가능 범위: 오늘 ~ 1년 뒤
+
+# 자전거 경로: FOSSGIS가 운영하는 공개 OSRM 서버(자전거 프로필). 비상업·소규모 사용용이며 초당 1회 이하로 호출해야 한다.
+ROUTING_BASE = "https://routing.openstreetmap.de/routed-bike"
+ROUTING_USER_AGENT = "ddareungi-esg-demo/1.0"  # 서버 이용 규칙상 앱을 식별하는 값 (연락처를 덧붙이는 것을 권장)
+ROUTING_TIMEOUT_S = 10
+NEAREST_CANDIDATES = 3  # 직선거리 기준 가까운 후보 수 (이 중 자전거 경로가 가장 짧은 곳을 고름)
 
 
 # ==========================================
@@ -83,15 +91,26 @@ def load_slice():
     return df
 
 
-@st.cache_data(show_spinner=False)
-def load_stations():
+def read_stations_csv():
     path = find_data_file(STATIONS_FILE)
     try:
         stations = pd.read_csv(path, encoding="utf-8-sig")
     except UnicodeDecodeError:
         stations = pd.read_csv(path, encoding="cp949")
     stations["station_id"] = stations["station_id"].astype(str)
-    return stations[["station_id", "station_name", "gu", "group"]]
+    return stations
+
+
+@st.cache_data(show_spinner=False)
+def load_stations():
+    return read_stations_csv()[["station_id", "station_name", "gu", "group"]]
+
+
+@st.cache_data(show_spinner=False)
+def load_station_locations():
+    """5번 메뉴용: 대여소 이름·구·좌표 (모델/예측 데이터 없이 CSV만 사용)."""
+    stations = read_stations_csv()[["station_id", "station_name", "gu", "lat", "lon"]]
+    return stations.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
 
 def pick_reference_date(target_date, df):
@@ -126,7 +145,8 @@ def sidebar_station_picker(disabled=False):
         "📍 대여소 선택",
         ["전체 대여소"] + sorted(lookup),
         disabled=disabled,
-        help="지도(1·2번 메뉴)는 선택한 대여소로 확대되고, 선 그래프(4번 메뉴)는 해당 대여소만 보여줍니다.",
+        help="지도(1·2번 메뉴)는 선택한 대여소로 확대되고, 선 그래프(4번 메뉴)는 해당 대여소만 보여주며, "
+             "5번 메뉴는 이 대여소에서 가장 가까운 대여소까지의 경로를 그립니다.",
     )
     return None if choice == "전체 대여소" else lookup[choice]
 
@@ -286,6 +306,82 @@ def run_daily_prediction(model_name, date):
     return sub[["대여소ID", "대여소명", "hour", "pred_rentals", "pred_returns"]]
 
 
+def haversine_m(lat1, lon1, lat2, lon2):
+    """두 지점 사이의 직선거리(m). lat2/lon2는 배열이어도 된다."""
+    r = 6371000.0
+    p1, p2 = np.radians(lat1), np.radians(lat2)
+    d_phi = p2 - p1
+    d_lambda = np.radians(lon2) - np.radians(lon1)
+    a = np.sin(d_phi / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(d_lambda / 2) ** 2
+    return 2 * r * np.arcsin(np.sqrt(a))
+
+
+def nearest_stations(stations, station_id, k=NEAREST_CANDIDATES):
+    """선택한 대여소와 직선거리 기준으로 가까운 후보 k곳. (선택 대여소, 후보 표) 또는 None."""
+    me_rows = stations[stations["station_id"] == station_id]
+    others = stations[stations["station_id"] != station_id].copy()
+    if me_rows.empty or others.empty:
+        return None
+    me = me_rows.iloc[0]
+    others["straight_m"] = haversine_m(
+        me["lat"], me["lon"], others["lat"].to_numpy(dtype=float), others["lon"].to_numpy(dtype=float)
+    )
+    return me, others.nsmallest(k, "straight_m").reset_index(drop=True)
+
+
+def fmt_distance(meters):
+    return f"{meters / 1000:.1f} km" if meters >= 1000 else f"{meters:,.0f} m"
+
+
+def osrm_get(path, params):
+    resp = requests.get(
+        f"{ROUTING_BASE}/{path}",
+        params=params,
+        headers={"User-Agent": ROUTING_USER_AGENT},
+        timeout=ROUTING_TIMEOUT_S,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != "Ok":
+        raise ValueError(f"routing error: {data.get('code')} {data.get('message', '')}")
+    return data
+
+
+@st.cache_data(show_spinner="자전거 경로를 찾는 중입니다...", ttl=24 * 3600)
+def find_bike_route(me_lat, me_lon, candidates):
+    """후보(직선거리 가까운 순) 중 자전거 경로가 가장 짧은 대여소를 고르고 그 경로를 돌려준다.
+    candidates: ((lat, lon), ...). 경로 호출이 실패하면 예외를 던진다(실패 결과가 캐시되지 않도록)."""
+    best = 0
+    if len(candidates) > 1:
+        try:
+            coords = ";".join(f"{lon:.6f},{lat:.6f}" for lat, lon in [(me_lat, me_lon), *candidates])
+            destinations = ";".join(str(i) for i in range(1, len(candidates) + 1))
+            data = osrm_get(
+                f"table/v1/driving/{coords}",
+                {"sources": "0", "destinations": destinations, "annotations": "distance"},
+            )
+            reachable = [(d, i) for i, d in enumerate(data["distances"][0]) if d is not None]
+            if reachable:
+                best = min(reachable)[1]
+        except Exception:
+            best = 0  # 거리 비교에 실패하면 직선거리 기준 1순위 후보로 진행
+        finally:
+            time.sleep(1.1)  # 공개 서버 이용 규칙: 초당 1회 이하
+
+    lat, lon = candidates[best]
+    data = osrm_get(
+        f"route/v1/driving/{me_lon:.6f},{me_lat:.6f};{lon:.6f},{lat:.6f}",
+        {"overview": "full", "geometries": "geojson"},
+    )
+    route = data["routes"][0]
+    return {
+        "index": best,
+        "distance_m": float(route["distance"]),
+        "duration_s": float(route["duration"]),
+        "path": [[la, lo] for lo, la in route["geometry"]["coordinates"]],  # GeoJSON은 (경도, 위도) 순서
+    }
+
+
 def hourly_totals(daily, station_id=None):
     """시간(0~23)별 예측 대여/반납 합계. station_id가 없으면 전체 대여소 합계."""
     sub = daily if station_id is None else daily[daily["대여소ID"] == station_id]
@@ -306,6 +402,7 @@ mode = st.sidebar.radio(
         "2. K-Means 클러스터 분석",
         "3. 기업 맞춤형 '그린 출퇴근 패스' (ESG 리포트)",
         "4. 시간대별 대여·반납 예측 (선 그래프)",
+        "5. 가까운 대여소 찾기 (경로 지도)",
     ],
 )
 
@@ -628,3 +725,100 @@ elif mode == "4. 시간대별 대여·반납 예측 (선 그래프)":
     )
     with st.expander("시간별 예측값 표 보기"):
         st.dataframe(hourly.round(1), use_container_width=True)
+
+# ------------------------------------------
+# Mode 5: 가까운 대여소 찾기 (경로 지도)
+# ------------------------------------------
+elif mode == "5. 가까운 대여소 찾기 (경로 지도)":
+    if not find_data_file(STATIONS_FILE).exists():
+        st.error(f"{STATIONS_FILE} 파일을 찾을 수 없습니다. data/ 폴더에 넣어 주세요.")
+        st.stop()
+
+    stations = load_station_locations()
+    st.subheader("🧭 선택한 대여소에서 자전거로 가장 가까운 대여소 찾기")
+
+    def add_other_stations(fmap, skip_ids=()):
+        """배경으로 나머지 대여소를 작은 회색 점으로 표시."""
+        for _, r in stations[~stations["station_id"].isin(skip_ids)].iterrows():
+            folium.CircleMarker(
+                location=[r["lat"], r["lon"]],
+                radius=4,
+                color="#8d99ae",
+                fill=True,
+                fill_opacity=0.8,
+                tooltip=f"{r['station_name']} ({r['gu']})",
+            ).add_to(fmap)
+
+    found = None if selected_station_id is None else nearest_stations(stations, selected_station_id)
+
+    if found is None:
+        st.info("사이드바의 '📍 대여소 선택'에서 대여소를 고르면, 자전거로 가장 가까운 대여소까지의 경로가 지도에 표시됩니다.")
+        m5 = folium.Map(location=[stations["lat"].mean(), stations["lon"].mean()], zoom_start=12)
+        add_other_stations(m5)
+        map5_key = "map5_all"
+        route = None
+    else:
+        me, cands = found
+        try:
+            route = find_bike_route(
+                float(me["lat"]),
+                float(me["lon"]),
+                tuple((float(r["lat"]), float(r["lon"])) for _, r in cands.iterrows()),
+            )
+        except Exception:
+            route = None  # 경로 서비스 연결 실패 → 아래에서 직선으로 대체
+
+        if route is not None:
+            near = cands.iloc[route["index"]]
+            path = route["path"]
+            minutes = max(1, round(route["duration_s"] / 60))
+            route_label = f"자전거 경로 약 {fmt_distance(route['distance_m'])}"
+            st.markdown(
+                f"**선택:** {me['station_name']} ({me['gu']}) → "
+                f"**자전거로 가장 가까운 대여소:** {near['station_name']} ({near['gu']}) · "
+                f"{route_label}, 약 **{minutes}분**"
+            )
+            if route["index"] != 0:
+                st.caption(
+                    f"💡 직선거리 기준 최단: {cands.iloc[0]['station_name']} · "
+                    f"자전거 경로 기준 최단: {near['station_name']} (길을 돌아가야 해서 순서가 달라졌습니다)"
+                )
+            line_style = {"color": "#e63946", "weight": 5, "opacity": 0.9}
+        else:
+            near = cands.iloc[0]
+            path = [[me["lat"], me["lon"]], [near["lat"], near["lon"]]]
+            route_label = f"직선거리 약 {fmt_distance(near['straight_m'])}"
+            st.warning("자전거 경로 서비스에 연결하지 못해 직선으로 대신 표시했습니다. 잠시 후 다시 시도해 주세요.")
+            st.markdown(
+                f"**선택:** {me['station_name']} ({me['gu']}) → "
+                f"**가장 가까운 대여소(직선거리):** {near['station_name']} ({near['gu']}) · {route_label}"
+            )
+            line_style = {"color": "#8d99ae", "weight": 4, "dash_array": "8"}
+
+        lats = [pt[0] for pt in path]
+        lons = [pt[1] for pt in path]
+        m5 = folium.Map(location=[(min(lats) + max(lats)) / 2, (min(lons) + max(lons)) / 2], zoom_start=15)
+        m5.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]], padding=(60, 60))
+        add_other_stations(m5, skip_ids=(me["station_id"], near["station_id"]))
+
+        folium.PolyLine(locations=path, tooltip=route_label, **line_style).add_to(m5)
+        folium.Marker(
+            location=[me["lat"], me["lon"]],
+            tooltip=f"선택: {me['station_name']}",
+            popup=folium.Popup(f"<b>{me['station_name']}</b><br>{me['gu']} (선택한 대여소)", max_width=300),
+            icon=folium.Icon(color="red", icon="star", prefix="glyphicon"),
+        ).add_to(m5)
+        folium.Marker(
+            location=[near["lat"], near["lon"]],
+            tooltip=f"가장 가까운 대여소: {near['station_name']}",
+            popup=folium.Popup(f"<b>{near['station_name']}</b><br>{near['gu']}<br>{route_label}", max_width=300),
+            icon=folium.Icon(color="blue", icon="flag", prefix="glyphicon"),
+        ).add_to(m5)
+        map5_key = f"map5_{selected_station_id}"
+
+    st_folium(m5, width="100%", height=480, returned_objects=[], key=map5_key)
+    if route is not None:
+        st.caption(
+            "경로: © OpenStreetMap contributors (ODbL) · OSRM, routing.openstreetmap.de (FOSSGIS). "
+            "공개 데모 서버를 쓰므로 비상업·소규모 용도로만 사용하세요."
+        )
