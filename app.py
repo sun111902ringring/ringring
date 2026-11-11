@@ -48,7 +48,77 @@ st.set_page_config(
 st.title("🚲 AI 기반 따릉이 역방향 불균형 예측 및 기업 ESG '그린 출퇴근 패스' 솔루션")
 st.caption(
     "출퇴근 피크 시간대 주거지 ↔ 업무지 간 역방향 수요 예측, K-Means 클러스터 분석, "
-    "그리고 기업 맞춤형 그린 출퇴근 패스 ESG 리포트를 제공합니다."
+    "시간대별 예측 그래프, 자전거 경로 기반 가까운 대여소 안내를 제공합니다."
+)
+
+# 사이드바: 접기(◀) 버튼을 '통합 운영 제어판' 제목과 같은 줄로 올리고, 내용을 위로 당긴다.
+# (스트림릿 내부 구조(data-testid)에 의존하므로, 버전이 바뀌면 어긋날 수 있다)
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebarHeader"] {
+        position: absolute !important;
+        top: calc(0.75rem + 20px) !important;
+        right: 0.75rem !important;
+        height: 2.25rem !important;
+        min-height: 0 !important;
+        padding: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        z-index: 2;
+    }
+    [data-testid="stSidebarUserContent"] {
+        padding-top: calc(0.75rem + 20px) !important;
+    }
+    .stat-row {
+        display: grid;
+        grid-template-columns: repeat(3, 6.5rem);
+        column-gap: 0.25rem;
+        justify-content: end;
+        align-items: start;
+    }
+    .stat-label { font-size: 0.75rem; opacity: 0.75; white-space: nowrap; }
+    .stat-help {
+        display: inline-block;
+        width: 0.95rem;
+        height: 0.95rem;
+        line-height: 0.95rem;
+        text-align: center;
+        font-size: 0.65rem;
+        border: 1px solid currentColor;
+        border-radius: 50%;
+        opacity: 0.6;
+        cursor: help;
+        margin-left: 0.2rem;
+    }
+    .stat-line { display: flex; align-items: center; gap: 0.5rem; white-space: nowrap; }
+    .stat-value { font-size: 1.2rem; }
+    .stat-pill { font-size: 0.7rem; padding: 0.1rem 0.5rem; border-radius: 1rem; }
+    .stat-pill.down { color: #09ab3b; background: rgba(33, 195, 84, 0.12); }
+    .stat-pill.up { color: #ff2b2b; background: rgba(255, 43, 43, 0.12); }
+    .compact-heading {
+        font-size: 1.2rem;
+        font-weight: 700;
+        line-height: 1.4;
+        white-space: nowrap;
+        margin: 0.25rem 0;
+    }
+    [data-testid="stSidebarUserContent"] hr {
+        margin: 1rem 0 !important;
+    }
+    [data-testid="stSidebarUserContent"] h3 {
+        padding-top: 0.25rem !important;
+    }
+    [data-testid="stSidebarUserContent"] h2 {
+        font-size: 1.25rem !important;
+        line-height: 2.25rem !important;
+        margin: 0 !important;
+        padding: 0 3rem 0 0 !important;
+        white-space: nowrap;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 
@@ -145,8 +215,8 @@ def sidebar_station_picker(disabled=False):
         "📍 대여소 선택",
         ["전체 대여소"] + sorted(lookup),
         disabled=disabled,
-        help="지도(1·2번 메뉴)는 선택한 대여소로 확대되고, 선 그래프(4번 메뉴)는 해당 대여소만 보여주며, "
-             "5번 메뉴는 이 대여소에서 가장 가까운 대여소까지의 경로를 그립니다.",
+        help="지도(1·2번 메뉴)는 선택한 대여소로 확대되고, 선 그래프(3번 메뉴)는 해당 대여소만 보여주며, "
+             "4번 메뉴는 이 대여소에서 가장 가까운 대여소까지의 경로를 그립니다.",
     )
     return None if choice == "전체 대여소" else lookup[choice]
 
@@ -329,6 +399,13 @@ def nearest_stations(stations, station_id, k=NEAREST_CANDIDATES):
     return me, others.nsmallest(k, "straight_m").reset_index(drop=True)
 
 
+def one_based(df):
+    """표의 행 번호(맨 왼쪽 열)가 0이 아니라 1부터 시작하도록 바꾼다."""
+    out = df.reset_index(drop=True)
+    out.index = out.index + 1
+    return out
+
+
 def fmt_distance(meters):
     return f"{meters / 1000:.1f} km" if meters >= 1000 else f"{meters:,.0f} m"
 
@@ -400,9 +477,8 @@ mode = st.sidebar.radio(
     [
         "1. 실시간 수급 불균형 지도",
         "2. K-Means 클러스터 분석",
-        "3. 기업 맞춤형 '그린 출퇴근 패스' (ESG 리포트)",
-        "4. 시간대별 대여·반납 예측 (선 그래프)",
-        "5. 가까운 대여소 찾기 (경로 지도)",
+        "3. 시간대별 대여·반납 예측 (선 그래프)",
+        "4. 가까운 대여소 찾기 (경로 지도)",
     ],
 )
 
@@ -418,8 +494,7 @@ selected_date = st.sidebar.date_input(
     max_value=today + dt.timedelta(days=MAX_DAYS_AHEAD),
 )
 period_label = st.sidebar.selectbox("피크 시간대 선택", list(PERIOD_OPTIONS))
-# ESG 리포트(3번) 화면에서는 쓰지 않지만, 선택값이 사라지지 않도록 비활성화 상태로 계속 보여준다.
-selected_station_id = sidebar_station_picker(disabled=mode.startswith("3."))
+selected_station_id = sidebar_station_picker()
 st.sidebar.caption(
     "선택한 날짜는 아직 실제 데이터가 없으므로, 같은 요일의 가장 최근 실제 데이터(대여·반납 이력, 재고, 기상)를 "
     "모델에 입력해 예측하는 시뮬레이션입니다."
@@ -513,34 +588,31 @@ if mode == "1. 실시간 수급 불균형 지도":
     shortage_cnt = len(df_predicted[df_predicted["위험상태"].str.contains("부족")])
     overflow_cnt = len(df_predicted[df_predicted["위험상태"].str.contains("포화")])
 
-    # 지도 제목 줄의 요약 지표를 작게 만드는 CSS (key="map_stats" 컨테이너 안의 metric에만 적용)
-    st.markdown(
-        """
-        <style>
-        .st-key-map_stats [data-testid="stMetricLabel"] p { font-size: 0.75rem; }
-        .st-key-map_stats [data-testid="stMetricValue"] { font-size: 1.2rem; }
-        .st-key-map_stats [data-testid="stMetricDelta"] { font-size: 0.7rem; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
     st.markdown("---")
     left_col, right_col = st.columns([2, 1])
 
     with left_col:
-        with st.container(key="map_stats"):
-            title_col, stat1, stat2, stat3 = st.columns([3, 1, 1, 1], vertical_alignment="center")
-            title_col.markdown(f"### 🗺️ 대여소별 위험도 지도 ({model_type})")
-            stat1.metric("분석 대여소", f"{len(df_predicted)}개소")
-            stat2.metric(
-                "부족 위험", f"{shortage_cnt}곳", delta="-경고", delta_color="inverse",
-                help="예측 잔여 자전거가 3대 이하라 대여가 어려운 대여소",
-            )
-            stat3.metric(
-                "포화 위험", f"{overflow_cnt}곳", delta="+주의", delta_color="inverse",
-                help="예측 잔여 자전거가 거치대 여유 3칸 이하라 반납이 어려운 대여소",
-            )
+        title_col, stats_col = st.columns([1, 1.2], vertical_alignment="center")
+        title_col.markdown(
+            f'<div class="compact-heading">🗺️ 대여소별 위험도 지도 ({model_type})</div>',
+            unsafe_allow_html=True,
+        )
+        # 값과 변화 태그를 한 줄에 놓기 위해 st.metric 대신 직접 만든 HTML을 사용 (줄바꿈 없이 한 줄로 조립)
+        stats_html = (
+            '<div class="stat-row">'
+            '<div class="stat"><div class="stat-label">분석 대여소</div>'
+            f'<div class="stat-line"><span class="stat-value">{len(df_predicted)}개소</span></div></div>'
+            '<div class="stat"><div class="stat-label">부족 위험 '
+            '<span class="stat-help" title="예측 잔여 자전거가 3대 이하라 대여가 어려운 대여소">?</span></div>'
+            f'<div class="stat-line"><span class="stat-value">{shortage_cnt}곳</span>'
+            '<span class="stat-pill down">↓ -경고</span></div></div>'
+            '<div class="stat"><div class="stat-label">포화 위험 '
+            '<span class="stat-help" title="예측 잔여 자전거가 거치대 여유 3칸 이하라 반납이 어려운 대여소">?</span></div>'
+            f'<div class="stat-line"><span class="stat-value">{overflow_cnt}곳</span>'
+            '<span class="stat-pill up">↑ +주의</span></div></div>'
+            '</div>'
+        )
+        stats_col.markdown(stats_html, unsafe_allow_html=True)
         selected_station = station_row(df_predicted, selected_station_id)
         m = make_base_map(df_predicted, selected_station)
 
@@ -584,7 +656,9 @@ if mode == "1. 실시간 수급 불균형 지도":
         )
 
     with right_col:
-        st.markdown("### 📋 대여소별 Net-flow 상세표")
+        st.markdown(
+            '<div class="compact-heading">📋 대여소별 Net-flow 상세표</div>', unsafe_allow_html=True
+        )
         table_cols = ["대여소명", "순수요_NetFlow", "위험상태"]
         if info["has_actual"]:
             table_cols.insert(2, "실제_NetFlow")
@@ -593,7 +667,7 @@ if mode == "1. 실시간 수급 불균형 지도":
             if c in table.columns:
                 table[c] = table[c].round(1)
         table = table.rename(columns={"실제_NetFlow": "참조일_실제_NetFlow"})
-        st.dataframe(table, use_container_width=True, height=400)
+        st.dataframe(one_based(table), use_container_width=True, height=400)
         if info["has_actual"]:
             st.caption(
                 f"참조일_실제_NetFlow: 참조일({info['ref_date']}) 같은 시간대의 실제 (반납 - 대여) 합계로, "
@@ -619,7 +693,7 @@ elif mode == "2. K-Means 클러스터 분석":
         .reset_index()
     )
 
-    st.dataframe(cluster_group, use_container_width=True)
+    st.dataframe(one_based(cluster_group), use_container_width=True)
 
     selected_station = station_row(df_predicted, selected_station_id)
     m_cluster = make_base_map(df_predicted, selected_station)
@@ -648,54 +722,9 @@ elif mode == "2. K-Means 클러스터 분석":
     )
 
 # ------------------------------------------
-# Mode 3: 기업 맞춤형 '그린 출퇴근 패스' (ESG 리포트)
+# Mode 3: 시간대별 대여·반납 예측 (선 그래프)
 # ------------------------------------------
-elif mode == "3. 기업 맞춤형 '그린 출퇴근 패스' (ESG 리포트)":
-    st.subheader("🏢 [기업 ESG/Welfare] 맞춤형 '그린 출퇴근 패스' 및 역방향 셔틀 챌린지")
-
-    st.markdown("""
-    여의도, 판교, 가산디지털단지 등 대형 업무 지구 내 기업 임직원들이 출퇴근 시 
-    따릉이 **역방향 구간**을 이용하도록 독려하고, 탄소 절감량과 예산 절감 기여도를 산출하여 
-    기업의 **ESG 평가 리포트**를 제공합니다.
-    """)
-
-    col_e1, col_e2, col_e3 = st.columns(3)
-
-    selected_company = st.selectbox(
-        "분석 대상 기업 선택",
-        ["A사 (여의도 금융권)", "B사 (판교 IT 테크)", "C사 (가산디지털 제조/유통)"],
-    )
-
-    emp_count = 1200 if "A사" in selected_company else (2500 if "B사" in selected_company else 800)
-    participation_rate = st.slider("임직원 그린 출퇴근 참여율 (%)", 10, 80, 35)
-
-    active_users = int(emp_count * (participation_rate / 100))
-    monthly_rides = active_users * 18
-    carbon_saved_kg = monthly_rides * 1.25
-    eco_points = active_users * 25
-
-    col_e1.metric("참여 임직원 수", f"{active_users:,} 명", delta=f"전체 임직원의 {participation_rate}%")
-    col_e2.metric("월간 탄소 배출 절감량", f"{carbon_saved_kg:,.1f} kg", delta="ESG 환경(E) 지표 기여")
-    col_e3.metric("임직원 복지 에코 포인트", f"{eco_points:,.0f} P", delta="Welfare ROI 연동")
-
-    st.markdown("---")
-    st.markdown("### 📈 기업 단위 자전거 이용 패턴 및 역방향 소진 분석")
-
-    df_esg_report = pd.DataFrame({
-        "기업명": [selected_company],
-        "인접 클러스터": ["여의도권" if "A사" in selected_company else ("판교/동북권" if "B사" in selected_company else "서남권")],
-        "출근 시간대 역방향 소진율": ["매우 높음 (92%)" if participation_rate > 30 else "보통 (60%)"],
-        "퇴근 시간대 셔틀 기여도": ["최우수 우수 기업"],
-        "ESG 가치 환산 점수": [f"{active_users * 2.5 + carbon_saved_kg * 0.5:.1f} 점"],
-    })
-
-    st.dataframe(df_esg_report, use_container_width=True)
-    st.success(f"💡 {selected_company} 임직원들의 역방향 대여소 자전거 활용으로 환경(E) 및 사회(S) 지표가 크게 향상되었습니다.")
-
-# ------------------------------------------
-# Mode 4: 시간대별 대여·반납 예측 (선 그래프)
-# ------------------------------------------
-elif mode == "4. 시간대별 대여·반납 예측 (선 그래프)":
+elif mode == "3. 시간대별 대여·반납 예측 (선 그래프)":
     ref_date = get_reference_date()
     daily = run_daily_prediction(model_type, ref_date)
     if daily is None:
@@ -727,9 +756,9 @@ elif mode == "4. 시간대별 대여·반납 예측 (선 그래프)":
         st.dataframe(hourly.round(1), use_container_width=True)
 
 # ------------------------------------------
-# Mode 5: 가까운 대여소 찾기 (경로 지도)
+# Mode 4: 가까운 대여소 찾기 (경로 지도)
 # ------------------------------------------
-elif mode == "5. 가까운 대여소 찾기 (경로 지도)":
+elif mode == "4. 가까운 대여소 찾기 (경로 지도)":
     if not find_data_file(STATIONS_FILE).exists():
         st.error(f"{STATIONS_FILE} 파일을 찾을 수 없습니다. data/ 폴더에 넣어 주세요.")
         st.stop()
